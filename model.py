@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import emoji
@@ -5,17 +6,13 @@ from googleapiclient.discovery import build
 from transformers import pipeline
 from collections import defaultdict
 
-emotion_model = pipeline(
-    "text-classification",
-    model="bhadresh-savani/bert-base-uncased-emotion",
-    return_all_scores=True
-)
+emotion_model = pipeline(model="seara/rubert-tiny2-ru-go-emotions")
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 api_service_name = "youtube"
 api_version = "v3"
-DEVELOPER_KEY = ""
+DEVELOPER_KEY = "*"
 
 youtube = build(api_service_name, api_version, developerKey=DEVELOPER_KEY)
 
@@ -85,14 +82,16 @@ def filter_comments(comments):
     comments_filtered = []
     pattern = re.compile(r"(?:\d{1,2}:)?\d{1,2}:\d{2}")
     for comment in comments:
+        if len(comment) > 2048:
+            continue
         timestamp = get_timestamp(pattern, comment)
         if timestamp is None:
             continue
         text = process_comment(comment)
         results = emotion_model(text)
-        for emotion in results[0]:
-            if emotion['score'] > 0.5:  # Порог 50%
-                comments_filtered.append({'text': text, 'emotion': emotion, 'timestamp': timestamp_to_seconds(timestamp)})
+        top_emotion = max(results, key=lambda x: x['score'])
+        if top_emotion['score'] > 0.5:  # Порог 50%
+            comments_filtered.append({'text': comment, 'emotion': top_emotion, 'timestamp': timestamp_to_seconds(timestamp)})
     return comments_filtered
 
 
@@ -113,29 +112,37 @@ def group_comments_by_time(comments_filtered):
 
 def get_dominant_emotion(group_of_comments):
     emotion_counts = defaultdict(int)
+    strongest_comments = defaultdict(lambda: {'comment': None, 'score': -1})
+
     for comment in group_of_comments:
         emotion = comment['emotion']['label']
+        emotion_score = comment['emotion']['score']
         emotion_counts[emotion] += 1
+
+        if emotion_score > strongest_comments[emotion]['score']:
+            strongest_comments[emotion] = {
+                'comment': comment['text'],
+                'score': emotion_score
+            }
 
     max_count = max(emotion_counts.values())
     dominant_emotions = [emotion for emotion, count in emotion_counts.items() if count == max_count]
 
     if len(dominant_emotions) == 1 and max_count > len(group_of_comments) / 2:
-        return dominant_emotions[0]
+        dominant_emotion = dominant_emotions[0]
+        strongest_comment = strongest_comments[dominant_emotion]['comment']
+        return dominant_emotion, strongest_comment
     else:
-        return None
+        return None, None
 
 
-def get_emotional_moments(grouped_comments):
+def get_emotional_moments(grouped_comments, factor):
     timestamp_emotion_pairs = []
     for timestamp, comments in grouped_comments.items():
-        if len(comments) >= 1:
-            dominant_emotion = get_dominant_emotion(comments)
-            if dominant_emotion:
-                timestamp_emotion_pairs.append((timestamp, dominant_emotion))
-    # Print the list of timestamp: emotion pairs
-    for timestamp, emotion in timestamp_emotion_pairs:
-        print(f"{timestamp}: {emotion}")
+        if len(comments) >= factor:
+            dominant_emotion, strongest_comment = get_dominant_emotion(comments)
+            if dominant_emotion is not None and dominant_emotion != 'neutral':
+                timestamp_emotion_pairs.append((timestamp, dominant_emotion, strongest_comment))
     return timestamp_emotion_pairs
 
 
@@ -143,5 +150,6 @@ def main(video_id, max_results):
     comments = get_comments(video_id, max_results)
     comments_with_timestamp = filter_comments(comments)
     grouped_comments_by_time = group_comments_by_time(comments_with_timestamp)
-    emotional_moments = get_emotional_moments(grouped_comments_by_time)
+    mean_num_of_comments_in_group = sum(map(lambda x: len(x), grouped_comments_by_time.values())) / len(grouped_comments_by_time.values())
+    emotional_moments = get_emotional_moments(grouped_comments_by_time, math.floor(mean_num_of_comments_in_group))
     return sorted(emotional_moments, key=lambda x: x[0])
